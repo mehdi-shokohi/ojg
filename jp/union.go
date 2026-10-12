@@ -25,9 +25,7 @@ func (f Union) Append(buf []byte, _, _ bool) []byte {
 		}
 		switch tx := x.(type) {
 		case string:
-			buf = append(buf, '\'')
-			buf = append(buf, tx...)
-			buf = append(buf, '\'')
+			buf = AppendString(buf, tx, '\'')
 		case int64:
 			buf = append(buf, strconv.FormatInt(tx, 10)...)
 		}
@@ -344,7 +342,9 @@ func (f Union) locate(pp Expr, data any, rest Expr, max int) (locs []Expr) {
 					has = true
 				}
 			default:
-				v, has = reflectGetNth(td, i)
+				if v, has = reflectGetNth(td, i); has && i < 0 {
+					i += reflect.Indirect(reflect.ValueOf(td)).Len()
+				}
 			}
 			lf = Nth(i)
 		}

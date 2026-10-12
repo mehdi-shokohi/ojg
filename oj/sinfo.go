@@ -88,11 +88,11 @@ func buildTagFields(rt reflect.Type, out, pretty, embedded, omitEmpty bool) (fa 
 	for i := rt.NumField() - 1; 0 <= i; i-- {
 		f := rt.Field(i)
 		name := []byte(f.Name)
-		if len(name) == 0 || 'a' <= name[0] {
+		if len(name) == 0 || 'a' <= name[0] || name[0] == '_' {
 			continue
 		}
-		if f.Anonymous && !out {
-			if f.Type.Kind() == reflect.Ptr {
+		if f.Anonymous && !out && f.Type.Kind() != reflect.Interface {
+			if f.Type.Kind() == reflect.Pointer {
 				for _, fi := range buildTagFields(f.Type.Elem(), out, pretty, embedded, omitEmpty) {
 					fi.index = append([]int{i}, fi.index...)
 					fi.Append = fi.iAppend
@@ -107,6 +107,7 @@ func buildTagFields(rt reflect.Type, out, pretty, embedded, omitEmpty bool) (fa 
 			}
 		} else {
 			asString := false
+			omit := omitEmpty
 			key := f.Name
 			if tag, ok := f.Tag.Lookup("json"); ok && 0 < len(tag) {
 				parts := strings.Split(tag, ",")
@@ -125,13 +126,13 @@ func buildTagFields(rt reflect.Type, out, pretty, embedded, omitEmpty bool) (fa 
 				for _, p := range parts[1:] {
 					switch p {
 					case "omitempty":
-						omitEmpty = true
+						omit = true
 					case "string":
 						asString = true
 					}
 				}
 			}
-			fa = append(fa, newFinfo(&f, key, omitEmpty, asString, pretty, embedded))
+			fa = append(fa, newFinfo(&f, key, omit, asString, pretty, embedded))
 		}
 	}
 	return
@@ -141,11 +142,11 @@ func buildExactFields(rt reflect.Type, out, pretty, embedded, omitEmpty bool) (f
 	for i := rt.NumField() - 1; 0 <= i; i-- {
 		f := rt.Field(i)
 		name := []byte(f.Name)
-		if len(name) == 0 || 'a' <= name[0] {
+		if len(name) == 0 || 'a' <= name[0] || name[0] == '_' {
 			continue
 		}
-		if f.Anonymous && !out {
-			if f.Type.Kind() == reflect.Ptr {
+		if f.Anonymous && !out && f.Type.Kind() != reflect.Interface {
+			if f.Type.Kind() == reflect.Pointer {
 				for _, fi := range buildExactFields(f.Type.Elem(), out, pretty, embedded, omitEmpty) {
 					fi.index = append([]int{i}, fi.index...)
 					fi.Append = fi.iAppend
@@ -169,11 +170,11 @@ func buildLowFields(rt reflect.Type, out, pretty, embedded, omitEmpty bool) (fa 
 	for i := rt.NumField() - 1; 0 <= i; i-- {
 		f := rt.Field(i)
 		name := []byte(f.Name)
-		if len(name) == 0 || 'a' <= name[0] {
+		if len(name) == 0 || 'a' <= name[0] || name[0] == '_' {
 			continue
 		}
-		if f.Anonymous && !out {
-			if f.Type.Kind() == reflect.Ptr {
+		if f.Anonymous && !out && f.Type.Kind() != reflect.Interface {
+			if f.Type.Kind() == reflect.Pointer {
 				for _, fi := range buildLowFields(f.Type.Elem(), out, pretty, embedded, omitEmpty) {
 					fi.index = append([]int{i}, fi.index...)
 					fi.Append = fi.iAppend

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"reflect"
 	"sort"
 	"strconv"
@@ -32,7 +33,6 @@ type Writer struct {
 	buf           []byte
 	w             io.Writer
 	findex        byte
-	strict        bool
 	appendArray   func(wr *Writer, data []any, depth int)
 	appendObject  func(wr *Writer, data map[string]any, depth int)
 	appendDefault func(wr *Writer, data any, depth int)
@@ -198,15 +198,29 @@ func (wr *Writer) appendJSON(data any, depth int) {
 		wr.buf = strconv.AppendUint(wr.buf, td, 10)
 
 	case float32:
-		if 0 < len(wr.FloatFormat) {
+		switch {
+		case td != td || math.IsInf(float64(td), 0):
+			if wr.Strict {
+				panic(fmt.Errorf("%v can not be encoded as a JSON element", td))
+			} else {
+				wr.buf = fmt.Appendf(wr.buf, `"%v"`, td)
+			}
+		case 0 < len(wr.FloatFormat):
 			wr.buf = fmt.Appendf(wr.buf, wr.FloatFormat, float64(td))
-		} else {
+		default:
 			wr.buf = strconv.AppendFloat(wr.buf, float64(td), 'g', -1, 32)
 		}
 	case float64:
-		if 0 < len(wr.FloatFormat) {
+		switch {
+		case td != td || math.IsInf(td, 0):
+			if wr.Strict {
+				panic(fmt.Errorf("%v can not be encoded as a JSON element", td))
+			} else {
+				wr.buf = fmt.Appendf(wr.buf, `"%v"`, td)
+			}
+		case 0 < len(wr.FloatFormat):
 			wr.buf = fmt.Appendf(wr.buf, wr.FloatFormat, td)
-		} else {
+		default:
 			wr.buf = strconv.AppendFloat(wr.buf, td, 'g', -1, 64)
 		}
 
@@ -233,7 +247,7 @@ func (wr *Writer) appendJSON(data any, depth int) {
 	case []any:
 		// go marshal treats a nil slice as a special case different from an
 		// empty slice. Seems kind of odd but here is the check.
-		if wr.strict && td == nil {
+		if wr.Strict && td == nil {
 			wr.buf = append(wr.buf, "null"...)
 			break
 		}
@@ -259,6 +273,9 @@ func (wr *Writer) appendJSON(data any, depth int) {
 		}
 		wr.buf = wr.appendString(wr.buf, string(out), !wr.HTMLUnsafe)
 
+	case json.Number:
+		wr.buf = append(wr.buf, td.String()...)
+
 	default:
 		wr.appendDefault(wr, data, depth)
 	}
@@ -275,7 +292,7 @@ func appendDefault(wr *Writer, data any, depth int) {
 	case !wr.NoReflect:
 		rv := reflect.ValueOf(data)
 		kind := rv.Kind()
-		if kind == reflect.Ptr {
+		if kind == reflect.Pointer {
 			rv = rv.Elem()
 			kind = rv.Kind()
 		}
@@ -287,7 +304,7 @@ func appendDefault(wr *Writer, data any, depth int) {
 		case reflect.Map:
 			wr.appendMap(rv, depth, nil)
 		case reflect.Chan, reflect.Func, reflect.UnsafePointer:
-			if wr.strict {
+			if wr.Strict {
 				panic(fmt.Errorf("%T can not be encoded as a JSON element", data))
 			}
 			wr.buf = append(wr.buf, "null"...)
@@ -295,7 +312,7 @@ func appendDefault(wr *Writer, data any, depth int) {
 			dec := alt.Decompose(data, &wr.Options)
 			wr.appendJSON(dec, depth)
 		}
-	case wr.strict:
+	case wr.Strict:
 		panic(fmt.Errorf("%T can not be encoded as a JSON element", data))
 	default:
 		wr.buf = wr.appendString(wr.buf, fmt.Sprintf("%v", data), !wr.HTMLUnsafe)
@@ -484,10 +501,12 @@ func (wr *Writer) appendStruct(rv reflect.Value, depth int, si *sinfo) {
 	fields := si.fields[wr.findex]
 	wr.buf = append(wr.buf, '{')
 	empty := true
-	var v any
 	indented := false
-	var is string
-	var cs string
+	var (
+		v  any
+		is string
+		cs string
+	)
 	if wr.Tab {
 		x := depth + 1
 		if len(tabs) < x {
@@ -565,7 +584,7 @@ func (wr *Writer) appendStruct(rv reflect.Value, depth int, si *sinfo) {
 		kind := fi.kind
 	Retry:
 		switch kind {
-		case reflect.Ptr:
+		case reflect.Pointer:
 			if (*[2]uintptr)(unsafe.Pointer(&v))[1] != 0 { // Check for nil of any type
 				fv = reflect.ValueOf(v).Elem()
 				kind = fv.Kind()
@@ -672,7 +691,7 @@ func (wr *Writer) appendSlice(rv reflect.Value, depth int, si *sinfo) {
 func (wr *Writer) appendMap(rv reflect.Value, depth int, si *sinfo) {
 	keys := rv.MapKeys()
 	if wr.Sort {
-		sort.Slice(keys, func(i, j int) bool { return 0 > strings.Compare(keys[i].String(), keys[j].String()) })
+		sort.Slice(keys, func(i, j int) bool { return 0 > strings.Compare(ojg.KeyString(keys[i]), ojg.KeyString(keys[j])) })
 	}
 	d2 := depth + 1
 	var is string
@@ -704,7 +723,7 @@ func (wr *Writer) appendMap(rv reflect.Value, depth int, si *sinfo) {
 	wr.buf = append(wr.buf, '{')
 	for _, kv := range keys {
 		rm := rv.MapIndex(kv)
-		if rm.Kind() == reflect.Ptr {
+		if rm.Kind() == reflect.Pointer {
 			if rm.IsNil() {
 				if wr.OmitNil {
 					continue
@@ -716,7 +735,7 @@ func (wr *Writer) appendMap(rv reflect.Value, depth int, si *sinfo) {
 		switch rm.Kind() {
 		case reflect.Struct:
 			wr.buf = append(wr.buf, cs...)
-			wr.buf = wr.appendString(wr.buf, kv.String(), !wr.HTMLUnsafe)
+			wr.buf = wr.appendString(wr.buf, ojg.KeyString(kv), !wr.HTMLUnsafe)
 			wr.buf = append(wr.buf, ": "...)
 			wr.appendStruct(rm, d2, si)
 		case reflect.Slice, reflect.Array:
@@ -724,7 +743,7 @@ func (wr *Writer) appendMap(rv reflect.Value, depth int, si *sinfo) {
 				continue
 			}
 			wr.buf = append(wr.buf, cs...)
-			wr.buf = wr.appendString(wr.buf, kv.String(), !wr.HTMLUnsafe)
+			wr.buf = wr.appendString(wr.buf, ojg.KeyString(kv), !wr.HTMLUnsafe)
 			wr.buf = append(wr.buf, ": "...)
 			wr.appendSlice(rm, d2, si)
 		case reflect.Map:
@@ -732,7 +751,7 @@ func (wr *Writer) appendMap(rv reflect.Value, depth int, si *sinfo) {
 				continue
 			}
 			wr.buf = append(wr.buf, cs...)
-			wr.buf = wr.appendString(wr.buf, kv.String(), !wr.HTMLUnsafe)
+			wr.buf = wr.appendString(wr.buf, ojg.KeyString(kv), !wr.HTMLUnsafe)
 			wr.buf = append(wr.buf, ": "...)
 			wr.appendMap(rm, d2, si)
 		case reflect.String:
@@ -740,12 +759,12 @@ func (wr *Writer) appendMap(rv reflect.Value, depth int, si *sinfo) {
 				continue
 			}
 			wr.buf = append(wr.buf, cs...)
-			wr.buf = wr.appendString(wr.buf, kv.String(), !wr.HTMLUnsafe)
+			wr.buf = wr.appendString(wr.buf, ojg.KeyString(kv), !wr.HTMLUnsafe)
 			wr.buf = append(wr.buf, ": "...)
 			wr.appendJSON(rm.Interface(), d2)
 		default:
 			wr.buf = append(wr.buf, cs...)
-			wr.buf = wr.appendString(wr.buf, kv.String(), !wr.HTMLUnsafe)
+			wr.buf = wr.appendString(wr.buf, ojg.KeyString(kv), !wr.HTMLUnsafe)
 			wr.buf = append(wr.buf, ": "...)
 			wr.appendJSON(rm.Interface(), d2)
 		}

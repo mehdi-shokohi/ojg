@@ -3,8 +3,10 @@
 package oj_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/iotest"
@@ -382,4 +384,40 @@ func TestParserNumConv(t *testing.T) {
 
 	v = oj.MustLoad(strings.NewReader("0.1234567890123456789"), ojg.NumConvFloat64)
 	tt.Equal(t, 0.123456789012345678, v)
+}
+
+func TestParserDecimal(t *testing.T) {
+	for i, str := range []string{
+		"0.12345",
+		"0.00012345",
+		"0.000000000000012345",
+		"0.000000000000000000123456",
+	} {
+		v := oj.MustParseString(str)
+		j := oj.JSON(v)
+		tt.Equal(t, str, j, "%d: %s", i, str)
+	}
+}
+
+func TestParserDecimalSplit(t *testing.T) {
+	// Verifies that a decimal number that is split by then buffered read size
+	// (4096 for oj and sen parsers) is parsed correctly.
+	numStr := "0.00044885930032905006"
+	b := bytes.Repeat([]byte{' '}, 4080)
+	b = append(b, numStr...)
+
+	v := oj.MustLoad(bytes.NewReader(b))
+	num, ok := v.(json.Number)
+	tt.Equal(t, true, ok)
+	tt.Equal(t, numStr, num.String())
+}
+
+func TestParseExponentPastExactPow10(t *testing.T) {
+	for _, src := range []string{"1.5e22", "1e-22", "1.5e23", "1.5e-23", "1e-23", "123e23"} {
+		v, err := oj.Parse([]byte(src))
+		tt.Nil(t, err, src)
+		want, werr := strconv.ParseFloat(src, 64)
+		tt.Nil(t, werr, src)
+		tt.Equal(t, want, v, src)
+	}
 }

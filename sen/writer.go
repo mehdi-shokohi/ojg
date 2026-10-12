@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"reflect"
 	"sort"
 	"strconv"
@@ -199,15 +200,33 @@ func (wr *Writer) appendSEN(data any, depth int) {
 		wr.buf = strconv.AppendUint(wr.buf, td, 10)
 
 	case float32:
-		if 0 < len(wr.FloatFormat) {
+		switch {
+		case td != td && wr.Strict:
+			panic(fmt.Errorf("%v can not be encoded as a JSON element", td))
+		case math.IsInf(float64(td), 0):
+			if wr.Strict {
+				panic(fmt.Errorf("%v can not be encoded as a JSON element", td))
+			} else {
+				wr.buf = fmt.Appendf(wr.buf, `"%v"`, td)
+			}
+		case 0 < len(wr.FloatFormat):
 			wr.buf = fmt.Appendf(wr.buf, wr.FloatFormat, float64(td))
-		} else {
+		default:
 			wr.buf = strconv.AppendFloat(wr.buf, float64(td), 'g', -1, 32)
 		}
 	case float64:
-		if 0 < len(wr.FloatFormat) {
+		switch {
+		case td != td && wr.Strict:
+			panic(fmt.Errorf("%v can not be encoded as a JSON element", td))
+		case math.IsInf(td, 0):
+			if wr.Strict {
+				panic(fmt.Errorf("%v can not be encoded as a JSON element", td))
+			} else {
+				wr.buf = fmt.Appendf(wr.buf, `"%v"`, td)
+			}
+		case 0 < len(wr.FloatFormat):
 			wr.buf = fmt.Appendf(wr.buf, wr.FloatFormat, td)
-		} else {
+		default:
 			wr.buf = strconv.AppendFloat(wr.buf, td, 'g', -1, 64)
 		}
 
@@ -256,6 +275,9 @@ func (wr *Writer) appendSEN(data any, depth int) {
 		}
 		wr.buf = wr.appendString(wr.buf, string(out), !wr.HTMLUnsafe)
 
+	case json.Number:
+		wr.buf = append(wr.buf, td.String()...)
+
 	default:
 		wr.appendDefault(wr, data, depth)
 		if 0 < len(wr.buf) {
@@ -278,7 +300,7 @@ func appendDefault(wr *Writer, data any, depth int) {
 	if !wr.NoReflect {
 		rv := reflect.ValueOf(data)
 		kind := rv.Kind()
-		if kind == reflect.Ptr {
+		if kind == reflect.Pointer {
 			rv = rv.Elem()
 			kind = rv.Kind()
 		}
@@ -545,7 +567,7 @@ func (wr *Writer) appendStruct(rv reflect.Value, depth int, si *sinfo) {
 		kind := fi.kind
 	Retry:
 		switch kind {
-		case reflect.Ptr:
+		case reflect.Pointer:
 			if (*[2]uintptr)(unsafe.Pointer(&v))[1] != 0 { // Check for nil of any type
 				fv = reflect.ValueOf(v).Elem()
 				kind = fv.Kind()
@@ -674,13 +696,13 @@ func (wr *Writer) appendMap(rv reflect.Value, depth int, si *sinfo) {
 	}
 	keys := rv.MapKeys()
 	if wr.Sort {
-		sort.Slice(keys, func(i, j int) bool { return 0 > strings.Compare(keys[i].String(), keys[j].String()) })
+		sort.Slice(keys, func(i, j int) bool { return 0 > strings.Compare(ojg.KeyString(keys[i]), ojg.KeyString(keys[j])) })
 	}
 	empty := true
 	wr.buf = append(wr.buf, '{')
 	for _, kv := range keys {
 		rm := rv.MapIndex(kv)
-		if rm.Kind() == reflect.Ptr {
+		if rm.Kind() == reflect.Pointer {
 			if rm.IsNil() {
 				if wr.OmitNil {
 					continue
@@ -692,7 +714,7 @@ func (wr *Writer) appendMap(rv reflect.Value, depth int, si *sinfo) {
 		switch rm.Kind() {
 		case reflect.Struct:
 			wr.buf = append(wr.buf, cs...)
-			wr.buf = wr.appendString(wr.buf, kv.String(), !wr.HTMLUnsafe)
+			wr.buf = wr.appendString(wr.buf, ojg.KeyString(kv), !wr.HTMLUnsafe)
 			wr.buf = append(wr.buf, ": "...)
 			wr.appendStruct(rm, d2, si)
 		case reflect.Slice, reflect.Array:
@@ -700,7 +722,7 @@ func (wr *Writer) appendMap(rv reflect.Value, depth int, si *sinfo) {
 				continue
 			}
 			wr.buf = append(wr.buf, cs...)
-			wr.buf = wr.appendString(wr.buf, kv.String(), !wr.HTMLUnsafe)
+			wr.buf = wr.appendString(wr.buf, ojg.KeyString(kv), !wr.HTMLUnsafe)
 			wr.buf = append(wr.buf, ": "...)
 			wr.appendSlice(rm, d2, si)
 		case reflect.Map:
@@ -708,7 +730,7 @@ func (wr *Writer) appendMap(rv reflect.Value, depth int, si *sinfo) {
 				continue
 			}
 			wr.buf = append(wr.buf, cs...)
-			wr.buf = wr.appendString(wr.buf, kv.String(), !wr.HTMLUnsafe)
+			wr.buf = wr.appendString(wr.buf, ojg.KeyString(kv), !wr.HTMLUnsafe)
 			wr.buf = append(wr.buf, ": "...)
 			wr.appendMap(rm, d2, si)
 		case reflect.String:
@@ -716,12 +738,12 @@ func (wr *Writer) appendMap(rv reflect.Value, depth int, si *sinfo) {
 				continue
 			}
 			wr.buf = append(wr.buf, cs...)
-			wr.buf = wr.appendString(wr.buf, kv.String(), !wr.HTMLUnsafe)
+			wr.buf = wr.appendString(wr.buf, ojg.KeyString(kv), !wr.HTMLUnsafe)
 			wr.buf = append(wr.buf, ": "...)
 			wr.appendSEN(rm.Interface(), d2)
 		default:
 			wr.buf = append(wr.buf, cs...)
-			wr.buf = wr.appendString(wr.buf, kv.String(), !wr.HTMLUnsafe)
+			wr.buf = wr.appendString(wr.buf, ojg.KeyString(kv), !wr.HTMLUnsafe)
 			wr.buf = append(wr.buf, ": "...)
 			wr.appendSEN(rm.Interface(), d2)
 		}

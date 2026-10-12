@@ -62,7 +62,11 @@ func (p *Parser) Unmarshal(data []byte, vp any, recomposer ...alt.Recomposer) (e
 	orig := p.num.ForceFloat
 	p.num.ForceFloat = true
 	if v, err = p.Parse(data); err == nil {
-		_, err = alt.Recompose(v, vp)
+		if 0 < len(recomposer) {
+			_, err = recomposer[0].Recompose(v, vp)
+		} else {
+			_, err = alt.Recompose(v, vp)
+		}
 	}
 	p.num.ForceFloat = orig
 	return
@@ -445,8 +449,8 @@ func (p *Parser) parseBuffer(buf []byte, last bool) error {
 					break
 				}
 				p.num.Frac = p.num.Frac*10 + uint64(b-'0')
-				p.num.Div *= 10.0
-				if gen.BigLimit <= p.num.Div {
+				p.num.Div *= 10
+				if gen.DivLimit <= p.num.Div {
 					p.num.FillBig()
 					break
 				}

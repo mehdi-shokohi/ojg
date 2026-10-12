@@ -47,8 +47,9 @@ var (
 		{path: "..a", data: `[{"a":1,"b":2},{"a":2}]`, value: 5, expect: `[{"a":5,"b":2},{"a":5}]`},
 		{path: "[-1,'x'].a", data: `[{"a":1,"b":2},{"a":2}]`, value: 5, expect: `[{"a":1,"b":2},{"a":5}]`},
 		{path: "[1,'a'].a", data: `{"a":{"a":1,"b":2},"b":{"a":2}}`, value: 5, expect: `{"a":{"a":5,"b":2},"b":{"a":2}}`},
-		{path: "[:-1:2].a", data: `[{"a":1,"b":2},{"a":2},{"a":3}]`, value: 5, expect: `[{"a":5,"b":2},{"a":2},{"a":5}]`},
-		{path: "[-1:0:-2].a", data: `[{"a":1,"b":2},{"a":2},{"a":3}]`, value: 5, expect: `[{"a":5,"b":2},{"a":2},{"a":5}]`},
+		{path: "[::2].a", data: `[{"a":1,"b":2},{"a":2},{"a":3}]`, value: 5, expect: `[{"a":5,"b":2},{"a":2},{"a":5}]`},
+		{path: "[:-5].a", data: `[{"a":1,"b":2},{"a":2},{"a":3}]`, value: 5, expect: `[{"a":1,"b":2},{"a":2},{"a":3}]`},
+		{path: "[-1::-2].a", data: `[{"a":1,"b":2},{"a":2},{"a":3}]`, value: 5, expect: `[{"a":5,"b":2},{"a":2},{"a":5}]`},
 		{path: "[:5].a", data: `[{"a":1,"b":2},{"a":2},{"a":3}]`, value: 5, expect: `[{"a":5,"b":2},{"a":5},{"a":5}]`},
 		{path: "[?(@.b == 2)].a", data: `[{"a":1,"b":2},{"a":2},{"a":3}]`, value: 5, expect: `[{"a":5,"b":2},{"a":2},{"a":3}]`},
 		{path: "a[0]", data: `{}`, value: 3, expect: `{"a":[3]}`},
@@ -93,7 +94,7 @@ var (
 		{path: "[-1:0:-2].a", data: `[{"a":1,"b":2},{"a":2},{"a":3}]`, value: 5, expect: `[{"a":1,"b":2},{"a":2},{"a":5}]`},
 		{path: "[:5].a", data: `[{"a":1,"b":2},{"a":2},{"a":3}]`, value: 5, expect: `[{"a":5,"b":2},{"a":2},{"a":3}]`},
 		{path: "[?(@.b == 2)].a", data: `[{"a":1,"b":2},{"a":2},{"a":3}]`, value: 5, expect: `[{"a":5,"b":2},{"a":2},{"a":3}]`},
-		{path: "[-5:3].a", data: `[{"a":1,"b":2},{"a":2},{"a":3}]`, value: 5, expect: `[{"a":1,"b":2},{"a":2},{"a":3}]`},
+		{path: "[-5:3].a", data: `[{"a":1,"b":2},{"a":2},{"a":3}]`, value: 5, expect: `[{"a":5,"b":2},{"a":2},{"a":3}]`},
 		{path: "a[0]", data: `{}`, value: 3, expect: `{"a":[3]}`},
 		{path: "*.x", data: `{"a":null}`, value: 3, expect: `{"a":null}`},
 		{path: "[*].x", data: "[null]", value: 3, expect: `[null]`},
@@ -661,7 +662,7 @@ func TestSetKeyedIndexed(t *testing.T) {
 			del:   true,
 		},
 		{
-			src:   "$[0:-1][1]",
+			src:   "$[0:][1]",
 			value: 5,
 			data:  deepIndexed(),
 			after: `[
@@ -859,7 +860,7 @@ func TestSetKeyedIndexedReflect(t *testing.T) {
 ]`,
 		},
 		{
-			src:   "$[0:1].x",
+			src:   "$[0:2].x",
 			value: 5,
 			data:  flatReflectIndexed(),
 			after: `[
@@ -869,7 +870,7 @@ func TestSetKeyedIndexedReflect(t *testing.T) {
 ]`,
 		},
 		{
-			src:   "$[1:0:-1].x",
+			src:   "$[1::-1].x",
 			value: 5,
 			data:  flatReflectIndexed(),
 			after: `[
@@ -880,9 +881,7 @@ func TestSetKeyedIndexedReflect(t *testing.T) {
 		},
 	} {
 		x := jp.MustParseString(d.src)
-		var err error
-
-		err = x.Set(d.data, d.value)
+		err := x.Set(d.data, d.value)
 		if d.err {
 			tt.NotNil(t, err, "%s", d.src)
 		} else {
@@ -896,8 +895,61 @@ func TestSetMapPtrNil(t *testing.T) {
 	data := map[string]any{
 		"a": nil,
 	}
-	jp.C("a").Set(&data, nil)
+	_ = jp.C("a").Set(&data, nil)
 	tt.Nil(t, data["a"])
+}
+
+func TestSetNilMap(t *testing.T) {
+	// Writing a key into a nil map used to panic with "assignment to entry in
+	// nil map". An error is returned instead. Both the Child and the Union
+	// fragments write a known key, for simple maps and for gen.Object.
+	for _, d := range []struct {
+		path string
+		data any
+		err  string
+	}{
+		{path: "a", data: map[string]any(nil),
+			err: "can not set into a nil map[string]interface {} at 'a'"},
+		{path: "a.b", data: map[string]any(nil),
+			err: "can not set into a nil map[string]interface {} at 'a'"},
+		{path: "a.b", data: map[string]any{"a": map[string]any(nil)},
+			err: "can not set into a nil map[string]interface {} at 'a.b'"},
+		{path: "['a','b']", data: map[string]any(nil),
+			err: "can not set into a nil map[string]interface {} at '['a','b']'"},
+		{path: "a", data: gen.Object(nil),
+			err: "can not set into a nil gen.Object at 'a'"},
+		{path: "a.b", data: gen.Object{"a": gen.Object(nil)},
+			err: "can not set into a nil gen.Object at 'a.b'"},
+		{path: "['a','b']", data: gen.Object(nil),
+			err: "can not set into a nil gen.Object at '['a','b']'"},
+	} {
+		x, err := jp.ParseString(d.path)
+		tt.Nil(t, err, d.path)
+
+		var value any = 3
+		if _, ok := d.data.(gen.Object); ok {
+			value = gen.Int(3)
+		}
+		err = x.Set(d.data, value)
+		tt.NotNil(t, err, d.path)
+		tt.Equal(t, d.err, err.Error(), d.path)
+
+		err = x.SetOne(d.data, value)
+		tt.NotNil(t, err, d.path)
+		tt.Equal(t, d.err, err.Error(), d.path)
+	}
+}
+
+func TestDelNilMap(t *testing.T) {
+	// Deleting from a nil map is a no-op, not an error.
+	for _, path := range []string{"a", "a.b", "['a','b']", "*", "..a"} {
+		x, err := jp.ParseString(path)
+		tt.Nil(t, err, path)
+		tt.Nil(t, x.Del(map[string]any(nil)), path)
+		tt.Nil(t, x.DelOne(map[string]any(nil)), path)
+		tt.Nil(t, x.Del(gen.Object(nil)), path)
+		tt.Nil(t, x.DelOne(gen.Object(nil)), path)
+	}
 }
 
 func TestSetStructPtrNil(t *testing.T) {
@@ -905,6 +957,6 @@ func TestSetStructPtrNil(t *testing.T) {
 		B any
 	}
 	data := A{B: 1}
-	jp.C("b").Set(&data, nil)
+	_ = jp.C("b").Set(&data, nil)
 	tt.Nil(t, data.B)
 }

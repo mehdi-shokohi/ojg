@@ -7,10 +7,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ohler55/ojg"
 	"github.com/ohler55/ojg/gen"
 	"github.com/ohler55/ojg/jp"
 	"github.com/ohler55/ojg/oj"
 	"github.com/ohler55/ojg/pretty"
+	"github.com/ohler55/ojg/sen"
 	"github.com/ohler55/ojg/tt"
 )
 
@@ -82,7 +84,8 @@ func TestScriptParse(t *testing.T) {
 		{src: "(@.x[?(@.a == 5)] == 11)", expect: "(@.x[?(@.a == 5)] == 11)"},
 		{src: "((@.x == 3) || (@.y > 5))", expect: "(@.x == 3 || @.y > 5)"},
 		{src: "@.x == 3 || @.y > 5", expect: "(@.x == 3 || @.y > 5)"},
-		{src: "((@.x == 3) || (@.y > 5 && @.z))", expect: "(@.x == 3 || (@.y > 5 && @.z))"},
+		{src: "((@.x == 3) || (@.y > 5 && @.z))", expect: "(@.x == 3 || @.y > 5 && @.z)"},
+		{src: "(@.x == 3 || @.y > 5) && @.z", expect: "((@.x == 3 || @.y > 5) && @.z)"},
 		{src: "(@.x < 3 && @.x > 1 || @.z == 3)", expect: "(@.x < 3 && @.x > 1 || @.z == 3)"},
 		{src: "@.x < 3 && @.x > 1 || @.z == 3", expect: "(@.x < 3 && @.x > 1 || @.z == 3)"},
 		{src: "@.x + 3 > @.y - 3", expect: "(@.x + 3 > @.y - 3)"},
@@ -182,6 +185,7 @@ func TestScriptNormalizeEval(t *testing.T) {
 		result, _ := s.Eval([]any{}, []any{v}).([]any)
 		tt.Equal(t, 1, len(result), fmt.Sprintf("%T %v", v, v))
 	}
+
 	s, err = jp.NewScript("(@ == 'x')")
 	tt.Nil(t, err)
 	result, _ := s.Eval([]any{}, []any{"x"}).([]any)
@@ -193,6 +197,48 @@ func TestScriptNormalizeEval(t *testing.T) {
 	tt.Nil(t, err)
 	result, _ = s.Eval([]any{}, gen.Array{gen.True}).([]any)
 	tt.Equal(t, 1, len(result), "bool normalize")
+
+	type (
+		customBool    bool
+		customInt     int
+		customInt8    int8
+		customInt16   int16
+		customInt32   int32
+		customInt64   int64
+		customUint    uint
+		customUint8   uint8
+		customUint16  uint16
+		customUint32  uint32
+		customUint64  uint64
+		customFloat32 float32
+		customFloat64 float64
+		customString  string
+	)
+
+	for _, tc := range []struct {
+		v         any
+		scriptStr string
+	}{
+		{customBool(true), "(@ == true)"},
+		{customInt(3), "(@ == 3)"},
+		{customInt8(3), "(@ == 3)"},
+		{customInt16(3), "(@ == 3)"},
+		{customInt32(3), "(@ == 3)"},
+		{customInt64(3), "(@ == 3)"},
+		{customUint(3), "(@ == 3)"},
+		{customUint8(3), "(@ == 3)"},
+		{customUint16(3), "(@ == 3)"},
+		{customUint32(3), "(@ == 3)"},
+		{customUint64(3), "(@ == 3)"},
+		{customFloat32(3.0), "(@ == 3.0)"},
+		{customFloat64(3.0), "(@ == 3.0)"},
+		{customString("x"), "(@ == 'x')"},
+	} {
+		s, err = jp.NewScript(tc.scriptStr)
+		tt.Nil(t, err)
+		result, _ = s.Eval([]any{}, []any{tc.v}).([]any)
+		tt.Equal(t, 1, len(result), fmt.Sprintf("custom type %T normalize", tc.v))
+	}
 }
 
 func TestScriptNonListEval(t *testing.T) {
@@ -267,14 +313,24 @@ func TestScriptEval(t *testing.T) {
 		{src: "(@ ~= 'a.c')", value: "abb", noMatch: true},
 		{src: "(@ =~ 'a.c')", value: int64(3), noMatch: true},
 
-		{src: "(@.x || @.y)", value: map[string]any{"x": false, "y": false}, noMatch: true},
-		{src: "(@.x || @.y)", value: map[string]any{"x": false, "y": true}},
+		// A bare @.x is an existence check.
+		{src: "(@.x || @.y)", value: map[string]any{"a": false, "b": false}, noMatch: true},
+		{src: "(@.x || @.y)", value: map[string]any{"x": false, "y": false}},
+		{src: "(@.a || @.y)", value: map[string]any{"x": false, "y": true}},
 
-		{src: "(@.x && @.y)", value: map[string]any{"x": true, "y": false}, noMatch: true},
+		{src: "(@.x && @.y)", value: map[string]any{"a": true, "y": false}, noMatch: true},
+		{src: "(@.y && @.x)", value: map[string]any{"a": true, "y": false}, noMatch: true},
 		{src: "(@.x && @.y)", value: map[string]any{"x": true, "y": true}},
 
+		// && binds more tightly than ||.
+		{src: "(@.x || @.y && @.z)", value: map[string]any{"x": true}},
+		{src: "(@.x && @.y || @.z)", value: map[string]any{"z": true}},
+		{src: "(@.x == 1 || @.y == 2 && @.z == 3)", value: map[string]any{"x": 1}},
+		{src: "(@.x == 1 || @.y == 2 && @.z == 3)", value: map[string]any{"y": 2}, noMatch: true},
+		{src: "((@.x || @.y) && @.z)", value: map[string]any{"x": true}, noMatch: true},
+
 		{src: "(!@.x)", value: map[string]any{"x": true}, noMatch: true},
-		{src: "(!@.x)", value: map[string]any{"x": false}},
+		{src: "(!@.x)", value: map[string]any{"y": true}},
 
 		{src: "(@.x + @.y == 0)", value: map[string]any{"x": 1, "y": 2}, noMatch: true},
 		{src: "(@.x + @.y == 3)", value: map[string]any{"x": 1, "y": 2}},
@@ -344,9 +400,9 @@ func TestScriptEval(t *testing.T) {
 		tt.Nil(t, err)
 		result, _ := s.Eval([]any{}, []any{d.value}).([]any)
 		if d.noMatch {
-			tt.Equal(t, 0, len(result), d.src, " in ", d.value)
+			tt.Equal(t, 0, len(result), "%s in %s", d.src, sen.String(d.value))
 		} else {
-			tt.Equal(t, 1, len(result), d.src, " in ", d.value)
+			tt.Equal(t, 1, len(result), "%s in %s", d.src, sen.String(d.value))
 		}
 	}
 }
@@ -427,4 +483,74 @@ func TestScriptRegisterBinaryFunction(t *testing.T) {
 	tt.Equal(t, 1, len(s.Eval([]any{}, []any{map[string]any{"x": "abc", "y": "ABC"}}).([]any)))
 
 	tt.Panic(t, func() { jp.RegisterBinaryFunction("length", false, false, func(left, right any) any { return nil }) })
+}
+
+func TestScriptExistEval(t *testing.T) {
+	data := []any{
+		map[string]any{
+			"a": 1,
+			"b": 2,
+			"z": 4,
+		},
+		map[string]any{
+			"a": 10,
+			"b": 20,
+			"c": 30,
+		},
+	}
+	x := jp.MustParseString("[?(@.z)]")
+	result := x.Get(data)
+
+	tt.Equal(t, "[{a:1 b:2 z:4}]", sen.String(result, &ojg.Options{Sort: true}))
+}
+
+func TestScriptNilDataEval(t *testing.T) {
+	for _, src := range []string{
+		"[?(@.x > 1)]",
+		"[?(@.x)]",
+		"[?(@ > 1)]",
+		"[?(@.a == 'x')]",
+		"[?(!@.x)]",
+		"$..[?(@.x)]",
+	} {
+		x, err := jp.ParseString(src)
+		tt.Nil(t, err)
+
+		tt.Equal(t, 0, len(x.Get(nil)), src)
+		tt.Equal(t, 0, len(x.Locate(nil, 0)), src)
+		tt.Equal(t, nil, x.First(nil), src)
+		tt.Equal(t, false, x.Has(nil), src)
+
+		got, found := x.FirstFound(nil)
+		tt.Equal(t, nil, got, src)
+		tt.Equal(t, false, found, src)
+	}
+}
+
+func TestScriptDeepEquality(t *testing.T) {
+	data := oj.MustParseString(`[
+  {"a": [1, 2.0, {"x": "y"}], "b": [1, 2, {"x": "y"}]},
+  {"a": [1, 2], "b": [1, 3]},
+  {"a": {"k": [1]}, "b": {"k": [1.0]}},
+  {"a": {"k": 1}, "b": {"k": 1, "m": 2}},
+  {"a": [], "b": {}}
+]`)
+	eq := jp.MustParseString("$[?@.a==@.b]").Get(data)
+	tt.Equal(t, 2, len(eq))
+	tt.Equal(t, data.([]any)[0], eq[0])
+	tt.Equal(t, data.([]any)[2], eq[1])
+
+	neq := jp.MustParseString("$[?@.a!=@.b]").Get(data)
+	tt.Equal(t, 3, len(neq))
+
+	// An array or object compared with itself is equal.
+	tt.Equal(t, 5, len(jp.MustParseString("$[?@==@]").Get(data)))
+	tt.Equal(t, 5, len(jp.MustParseString("$[?$==$]").Get(data)))
+
+	// Go slices that are not []any are compared with reflect.DeepEqual.
+	godata := []any{
+		map[string]any{"a": []int{1, 2}, "b": []int{1, 2}},
+		map[string]any{"a": []int{1, 2}, "b": []int{2, 1}},
+	}
+	tt.Equal(t, 1, len(jp.MustParseString("$[?@.a==@.b]").Get(godata)))
 }

@@ -25,7 +25,7 @@ var (
 	gt     = &op{prec: 3, code: '>', name: ">", cnt: 2}
 	lte    = &op{prec: 3, code: 'l', name: "<=", cnt: 2}
 	gte    = &op{prec: 3, code: 'g', name: ">=", cnt: 2}
-	or     = &op{prec: 4, code: '|', name: "||", cnt: 2}
+	or     = &op{prec: 5, code: '|', name: "||", cnt: 2}
 	and    = &op{prec: 4, code: '&', name: "&&", cnt: 2}
 	not    = &op{prec: 0, code: '!', name: "!", cnt: 1}
 	add    = &op{prec: 2, code: '+', name: "+", cnt: 2}
@@ -98,6 +98,10 @@ type precBuf struct {
 }
 
 type multivalue []any
+
+type got struct {
+	value any
+}
 
 // Script represents JSON Path script used in filters as well.
 type Script struct {
@@ -186,15 +190,14 @@ func (s *Script) Eval(stack, data any) any {
 }
 
 func (s *Script) evalWithRoot(stack, data, root any) (any, Expr) {
-	// Checking the type each iteration adds 2.5% but allows code not to be
-	// duplicated and not to call a separate function. Using just one more
-	// function call for each iteration adds 6.5%.
 	var (
 		dlen    int
 		locKeys Expr
 		locs    Expr
 	)
 	switch td := data.(type) {
+	case nil:
+		return stack, locs
 	case []any:
 		dlen = len(td)
 	case gen.Array:
@@ -228,6 +231,9 @@ func (s *Script) evalWithRoot(stack, data, root any) (any, Expr) {
 		data = da
 	default:
 		rv := reflect.ValueOf(td)
+		if rt := rv.Type(); rt.Kind() == reflect.Pointer {
+			rv = rv.Elem()
+		}
 		if rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array {
 			return stack, locs
 		}
@@ -241,6 +247,7 @@ func (s *Script) evalWithRoot(stack, data, root any) (any, Expr) {
 	}
 	sstack := make([]any, len(s.template))
 	var v any
+
 	for vi := dlen - 1; 0 <= vi; vi-- {
 		switch td := data.(type) {
 		case []any:
@@ -252,10 +259,13 @@ func (s *Script) evalWithRoot(stack, data, root any) (any, Expr) {
 		}
 		// Eval script for each member of the list.
 		copy(sstack, s.template)
-		var multi bool
-		// resolve all expr members
+		var (
+			match bool
+			multi bool
+		)
 		for i, ev := range sstack {
 			if 0 < i {
+				// Check for functions like 'count'.
 				if o, ok := sstack[i-1].(*op); ok && o.getLeft {
 					var x Expr
 					if x, ok = ev.(Expr); ok {
@@ -267,11 +277,7 @@ func (s *Script) evalWithRoot(stack, data, root any) (any, Expr) {
 				}
 				// TBD one more for getRight once function extensions are supported
 			}
-			// Normalize into nil, bool, int64, float64, and string early so
-			// that each comparison doesn't have to.
-		Normalize:
-			switch x := ev.(type) {
-			case Expr:
+			if x, ok := ev.(Expr); ok {
 				var has bool
 				dv := v
 				switch x[0].(type) {
@@ -285,20 +291,20 @@ func (s *Script) evalWithRoot(stack, data, root any) (any, Expr) {
 						var c Child
 						if c, ok = x[1].(Child); ok {
 							if ev, has = m[string(c)]; has {
-								sstack[i] = ev
-								goto Normalize
+								sstack[i] = &got{value: normalize(ev)}
 							} else {
 								sstack[i] = Nothing
 							}
+							continue
 						}
 					}
 				case Root:
 					dv = root
 				}
-				if x.Normal() {
+				if _, ok := x[0].(norm); ok {
+					x = x[1:]
 					if ev, has = x.FirstFound(dv); has {
-						sstack[i] = ev
-						goto Normalize
+						sstack[i] = &got{value: normalize(ev)}
 					} else {
 						sstack[i] = Nothing
 					}
@@ -308,51 +314,18 @@ func (s *Script) evalWithRoot(stack, data, root any) (any, Expr) {
 					case 0:
 						sstack[i] = Nothing
 					case 1:
-						sstack[i] = normalize(values[0])
+						sstack[i] = &got{value: normalize(values[0])}
 					default:
 						multi = true
 						mval := make(multivalue, len(values))
 						for gi, gv := range values {
-							mval[gi] = normalize(gv)
+							mval[gi] = &got{value: normalize(gv)}
 						}
 						sstack[i] = mval
 					}
 				}
-			case int:
-				sstack[i] = int64(x)
-			case int8:
-				sstack[i] = int64(x)
-			case int16:
-				sstack[i] = int64(x)
-			case int32:
-				sstack[i] = int64(x)
-			case uint:
-				sstack[i] = int64(x)
-			case uint8:
-				sstack[i] = int64(x)
-			case uint16:
-				sstack[i] = int64(x)
-			case uint32:
-				sstack[i] = int64(x)
-			case uint64:
-				sstack[i] = int64(x)
-			case float32:
-				sstack[i] = float64(x)
-			case gen.Bool:
-				sstack[i] = bool(x)
-			case gen.String:
-				sstack[i] = string(x)
-			case gen.Int:
-				sstack[i] = int64(x)
-			case gen.Float:
-				sstack[i] = float64(x)
-
-			default:
-				// Any other type are already simplified or are not
-				// handled and will fail later.
 			}
 		}
-		var match bool
 		if multi {
 			max := 1
 			for _, v := range sstack {
@@ -362,13 +335,18 @@ func (s *Script) evalWithRoot(stack, data, root any) (any, Expr) {
 			}
 			for mi := 0; mi < max; mi++ {
 				xstack := evalStack(expandStack(sstack, mi))
-				if match, _ = xstack[0].(bool); match {
+				if _, match = xstack[0].(*got); !match {
+					match, _ = xstack[0].(bool)
+				}
+				if match {
 					break
 				}
 			}
 		} else {
 			sstack = evalStack(sstack)
-			match, _ = sstack[0].(bool)
+			if _, match = sstack[0].(*got); !match {
+				match, _ = sstack[0].(bool)
+			}
 		}
 		if match {
 			switch tstack := stack.(type) {
@@ -400,7 +378,23 @@ func (s *Script) evalWithRoot(stack, data, root any) (any, Expr) {
 }
 
 func normalize(v any) any {
+	// handle special values
+	if v == Nothing {
+		return v
+	}
+
+	if v == nil {
+		return nil
+	}
+
+Start:
 	switch tv := v.(type) {
+	// optimize for already normalized values
+	case bool:
+	case int64:
+	case float64:
+	case string:
+	// handle inter-convertible values
 	case int:
 		v = int64(tv)
 	case int8:
@@ -429,6 +423,45 @@ func normalize(v any) any {
 		v = int64(tv)
 	case gen.Float:
 		v = float64(tv)
+	default:
+		switch rv := reflect.ValueOf(v); rv.Kind() {
+		// recursively handle pointers
+		case reflect.Pointer:
+			if !rv.IsNil() {
+				v = rv.Elem().Interface()
+				goto Start
+			}
+
+		// handle named types that implement common types
+		case reflect.Bool:
+			v = rv.Bool()
+		case reflect.Int:
+			v = rv.Int()
+		case reflect.Int8:
+			v = rv.Int()
+		case reflect.Int16:
+			v = rv.Int()
+		case reflect.Int32:
+			v = rv.Int()
+		case reflect.Int64:
+			v = rv.Int()
+		case reflect.Uint:
+			v = int64(rv.Uint())
+		case reflect.Uint8:
+			v = int64(rv.Uint())
+		case reflect.Uint16:
+			v = int64(rv.Uint())
+		case reflect.Uint32:
+			v = int64(rv.Uint())
+		case reflect.Uint64:
+			v = int64(rv.Uint())
+		case reflect.Float32:
+			v = rv.Float()
+		case reflect.Float64:
+			v = rv.Float()
+		case reflect.String:
+			v = rv.String()
+		}
 	}
 	return v
 }
@@ -446,6 +479,59 @@ func expandStack(stack []any, mi int) []any {
 	return nstack
 }
 
+// scriptEqual compares two filter operands. Numbers compare by value across
+// int64 and float64, and arrays and objects compare element by element as
+// RFC 9535 section 2.3.5.2.2 requires. Values of other types that Go cannot
+// compare with == (slices or maps of other types) fall back to
+// reflect.DeepEqual instead of panicking.
+func scriptEqual(left, right any) bool {
+	switch tl := left.(type) {
+	case int64:
+		switch tr := right.(type) {
+		case int64:
+			return tl == tr
+		case float64:
+			return float64(tl) == tr
+		}
+		return false
+	case float64:
+		switch tr := right.(type) {
+		case float64:
+			return tl == tr
+		case int64:
+			return tl == float64(tr)
+		}
+		return false
+	case []any:
+		tr, ok := right.([]any)
+		if !ok || len(tl) != len(tr) {
+			return false
+		}
+		for i, v := range tl {
+			if !scriptEqual(v, tr[i]) {
+				return false
+			}
+		}
+		return true
+	case map[string]any:
+		tr, ok := right.(map[string]any)
+		if !ok || len(tl) != len(tr) {
+			return false
+		}
+		for k, v := range tl {
+			if rv, has := tr[k]; !has || !scriptEqual(v, rv) {
+				return false
+			}
+		}
+		return true
+	}
+	if left != nil && !reflect.TypeOf(left).Comparable() ||
+		right != nil && !reflect.TypeOf(right).Comparable() {
+		return reflect.DeepEqual(left, right)
+	}
+	return left == right
+}
+
 func evalStack(sstack []any) []any {
 	for i := len(sstack) - 1; 0 <= i; i-- {
 		o, _ := sstack[i].(*op)
@@ -454,48 +540,32 @@ func evalStack(sstack []any) []any {
 			continue
 		}
 		var (
-			left  any
-			right any
+			left   any
+			right  any
+			gleft  bool
+			gright bool
 		)
 		if 1 < len(sstack)-i {
 			left = sstack[i+1]
+			if g, ok := left.(*got); ok {
+				left = g.value
+				gleft = true
+			}
 		}
 		if 2 < len(sstack)-i {
 			right = sstack[i+2]
+			if g, ok := right.(*got); ok {
+				right = g.value
+				gright = true
+			}
 		}
 		switch o.code {
 		case group.code:
 			sstack[i] = left
 		case eq.code:
-			if left == right {
-				sstack[i] = true
-			} else {
-				sstack[i] = false
-				switch tl := left.(type) {
-				case int64:
-					if tr, ok := right.(float64); ok {
-						sstack[i] = ok && float64(tl) == tr
-					}
-				case float64:
-					tr, ok := right.(int64)
-					sstack[i] = ok && tl == float64(tr)
-				}
-			}
+			sstack[i] = scriptEqual(left, right)
 		case neq.code:
-			if left == right {
-				sstack[i] = false
-			} else {
-				sstack[i] = true
-				switch tl := left.(type) {
-				case int64:
-					if tr, ok := right.(float64); ok {
-						sstack[i] = ok && float64(tl) != tr
-					}
-				case float64:
-					tr, ok := right.(int64)
-					sstack[i] = ok && tl != float64(tr)
-				}
-			}
+			sstack[i] = !scriptEqual(left, right)
 		case lt.code:
 			sstack[i] = false
 			switch tl := left.(type) {
@@ -582,16 +652,31 @@ func evalStack(sstack []any) []any {
 			}
 		case or.code:
 			// If one is a boolean true then true.
-			lb, _ := left.(bool)
-			rb, _ := right.(bool)
+			lb := gleft
+			if !lb {
+				lb, _ = left.(bool)
+			}
+			rb := gright
+			if !rb {
+				rb, _ = right.(bool)
+			}
 			sstack[i] = lb || rb
 		case and.code:
 			// If both are a boolean true then true else false.
-			lb, _ := left.(bool)
-			rb, _ := right.(bool)
+			lb := gleft
+			if !lb {
+				lb, _ = left.(bool)
+			}
+			rb := gright
+			if !rb {
+				rb, _ = right.(bool)
+			}
 			sstack[i] = lb && rb
 		case not.code:
-			lb, _ := left.(bool)
+			lb := gleft
+			if !lb {
+				lb, _ = left.(bool)
+			}
 			sstack[i] = !lb
 		case add.code:
 			sstack[i] = Nothing
@@ -663,7 +748,6 @@ func evalStack(sstack []any) []any {
 				case float64:
 					if tr != 0.0 {
 						sstack[i] = float64(tl) / tr
-
 					}
 				}
 			case float64:

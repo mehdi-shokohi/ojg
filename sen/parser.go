@@ -79,7 +79,11 @@ func (p *Parser) AddTokenFunc(name string, tf TokenFunc) {
 func (p *Parser) Unmarshal(data []byte, vp any, recomposer ...alt.Recomposer) (err error) {
 	var v any
 	if v, err = p.Parse(data); err == nil {
-		_, err = alt.Recompose(v, vp)
+		if 0 < len(recomposer) {
+			_, err = recomposer[0].Recompose(v, vp)
+		} else {
+			_, err = alt.Recompose(v, vp)
+		}
 	}
 	return
 }
@@ -132,6 +136,7 @@ func (p *Parser) Parse(buf []byte, args ...any) (any, error) {
 	p.line = 1
 	p.mode = valueMap
 	p.mi = 0
+	p.plus = false
 	var err error
 	// Skip BOM if present.
 	if 3 < len(buf) && buf[0] == 0xEF {
@@ -199,6 +204,7 @@ func (p *Parser) ParseReader(r io.Reader, args ...any) (data any, err error) {
 	p.noff = -1
 	p.line = 1
 	p.mi = 0
+	p.plus = false
 	buf := make([]byte, readBufSize)
 	eof := false
 	var cnt int
@@ -489,7 +495,7 @@ func (p *Parser) parseBuffer(buf []byte, last bool) (err error) {
 				}
 				p.num.Frac = p.num.Frac*10 + uint64(b-'0')
 				p.num.Div *= 10.0
-				if gen.BigLimit <= p.num.Div {
+				if gen.DivLimit <= p.num.Div {
 					p.num.FillBig()
 					break
 				}
@@ -526,6 +532,12 @@ func (p *Parser) parseBuffer(buf []byte, last bool) (err error) {
 			}
 			off += i
 		case valPlus:
+			// Concatenation with '+' requires a preceding string operand.
+			// Reject malformed input such as a leading '+' or a '+' after a
+			// non-string value here instead of panicking later in addString().
+			if !p.concatOperandOK() {
+				return p.newError(off, "unexpected character '%c'", b)
+			}
 			p.mode = plusMap
 			// Store additional state (plus) to be used later in addString()
 			// instead of creating another set of modes for this semi-rare
@@ -800,6 +812,25 @@ func (p *Parser) addTokenWith(s string, off int) {
 	default:
 		p.stack = append(p.stack, s)
 	}
+}
+
+// concatOperandOK reports whether the value that a '+' concatenation would
+// extend is present and is a string. It guards against malformed input (a
+// leading '+' with nothing on the stack, or a '+' following a non-string
+// value) that would otherwise panic in addString().
+func (p *Parser) concatOperandOK() bool {
+	if 0 < len(p.stack) {
+		if 0 < len(p.starts) && p.starts[len(p.starts)-1] == -1 { // object value
+			if obj, ok := p.stack[len(p.stack)-1].(map[string]any); ok {
+				_, ok = obj[string(p.lastKey)].(string)
+				return ok
+			}
+		} else {
+			_, ok := p.stack[len(p.stack)-1].(string)
+			return ok
+		}
+	}
+	return false
 }
 
 func (p *Parser) addString(s string, off int) {
